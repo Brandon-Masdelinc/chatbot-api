@@ -4,10 +4,14 @@ import multer from "multer";
 import { OpenAI } from "openai";
 import dotenv from "dotenv";
 import fetch from "node-fetch";
+import { Readable } from "stream";
 
 dotenv.config();
 const app = express();
 const port = process.env.PORT || 3000;
+
+// Middleware pour body brut (si ce n’est pas du multipart)
+app.use(express.raw({ type: "application/octet-stream", limit: "50mb" }));
 
 const upload = multer();
 app.use(cors());
@@ -18,7 +22,7 @@ const vectorStoreId = process.env.OPENAI_VECTOR_STORE_ID;
 
 const openai = new OpenAI({ apiKey });
 
-// Vérification config au démarrage
+// Vérification config
 if (!apiKey || !assistantId || !vectorStoreId) {
   console.error(
     "❌ ERREUR DE CONFIGURATION - Variables manquantes :",
@@ -31,7 +35,7 @@ if (!apiKey || !assistantId || !vectorStoreId) {
   process.exit(1);
 }
 
-// Endpoint de statut
+// Vérification /status
 app.get("/status", async (req, res) => {
   const status = {
     OPENAI_API_KEY: !!apiKey,
@@ -52,7 +56,7 @@ app.get("/status", async (req, res) => {
   res.json(status);
 });
 
-// Récupérer la liste des fichiers
+// Fonction pour lister les fichiers
 async function fetchVectorStoreFiles() {
   console.log("🔍 Récupération de la liste des fichiers…");
   const response = await fetch(
@@ -85,18 +89,37 @@ async function fetchVectorStoreFiles() {
   );
 }
 
-// Upload fichier (corrigé pour éviter multipart)
+// Endpoint upload (multipart OU brut)
 app.post("/files", upload.single("file"), async (req, res) => {
-  console.log("📤 Début upload :", req.file?.originalname || "Aucun fichier");
   try {
-    if (!req.file) return res.status(400).json({ error: "Aucun fichier reçu" });
+    let fileName;
+    let fileBuffer;
+
+    // Cas 1 : multipart (depuis app Shopify/admin)
+    if (req.file) {
+      fileName = req.file.originalname;
+      fileBuffer = req.file.buffer;
+    }
+    // Cas 2 : upload brut (depuis curl.exe ou script)
+    else if (req.headers["content-type"] === "application/octet-stream") {
+      fileName = "upload-raw.bin";
+      fileBuffer = req.body;
+    } else {
+      return res.status(400).json({ error: "Aucun fichier reçu" });
+    }
+
+    console.log("📤 Début upload :", fileName);
+
+    // Convertir le buffer en flux lisible (obligatoire pour OpenAI)
+    const stream = new Readable();
+    stream.push(fileBuffer);
+    stream.push(null);
 
     console.log("➡️ Upload via SDK OpenAI…");
-    // Upload via SDK (gère directement le flux)
     const uploadedFile = await openai.files.create({
-      file: req.file.buffer,
+      file: stream,
       purpose: "assistants",
-      filename: req.file.originalname,
+      filename: fileName,
     });
 
     // Associer au Vector Store
@@ -104,9 +127,9 @@ app.post("/files", upload.single("file"), async (req, res) => {
       file_id: uploadedFile.id,
     });
 
-    console.log(`✅ Fichier "${req.file.originalname}" ajouté et lié à ${vectorStoreId}`);
+    console.log(`✅ Fichier "${fileName}" ajouté et lié à ${vectorStoreId}`);
 
-    // Associer le Vector Store à l'assistant
+    // Relier le Vector Store à l’assistant
     try {
       await openai.assistants.update(assistantId, {
         tool_resources: { file_search: { vector_store_ids: [vectorStoreId] } },
@@ -155,6 +178,8 @@ app.delete("/files/:id", async (req, res) => {
 });
 
 // Page test
-app.get("/", (req, res) => res.send("API MasdelInc Chatbot - SDK OpenAI (corrigé)"));
+app.get("/", (req, res) =>
+  res.send("API MasdelInc Chatbot - Compatible multipart + octet-stream (SDK)")
+);
 
 app.listen(port, () => console.log(`🚀 API démarrée sur http://localhost:${port}`));
