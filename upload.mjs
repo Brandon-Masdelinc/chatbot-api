@@ -4,7 +4,6 @@ import multer from "multer";
 import { OpenAI } from "openai";
 import dotenv from "dotenv";
 import fetch from "node-fetch";
-import FormData from "form-data";
 
 dotenv.config();
 const app = express();
@@ -86,44 +85,42 @@ async function fetchVectorStoreFiles() {
   );
 }
 
-// Upload fichier
+// Upload fichier (corrigé pour éviter multipart)
 app.post("/files", upload.single("file"), async (req, res) => {
   console.log("📤 Début upload :", req.file?.originalname || "Aucun fichier");
   try {
     if (!req.file) return res.status(400).json({ error: "Aucun fichier reçu" });
 
-    const form = new FormData();
-    form.append("file", req.file.buffer, req.file.originalname);
+    console.log("➡️ Upload via SDK OpenAI…");
+    // Upload via SDK (gère directement le flux)
+    const uploadedFile = await openai.files.create({
+      file: req.file.buffer,
+      purpose: "assistants",
+      filename: req.file.originalname,
+    });
 
-    console.log("➡️ Envoi du fichier vers OpenAI…");
-    const uploadResponse = await fetch(
-      `https://api.openai.com/v1/vector_stores/${vectorStoreId}/files`,
-      { method: "POST", headers: { Authorization: `Bearer ${apiKey}` }, body: form }
-    );
+    // Associer au Vector Store
+    await openai.vectorStores.files.create(vectorStoreId, {
+      file_id: uploadedFile.id,
+    });
 
-    const rawResponse = await uploadResponse.text();
-    if (!uploadResponse.ok) {
-      console.error(`❌ Upload refusé (code ${uploadResponse.status}) :`, rawResponse);
-      return res.status(500).json({ error: `Upload refusé : ${rawResponse}` });
-    }
+    console.log(`✅ Fichier "${req.file.originalname}" ajouté et lié à ${vectorStoreId}`);
 
-    console.log("✅ Upload accepté par OpenAI :", rawResponse);
-
-    console.log("🔗 Association du Vector Store à l’assistant…");
+    // Associer le Vector Store à l'assistant
     try {
       await openai.assistants.update(assistantId, {
         tool_resources: { file_search: { vector_store_ids: [vectorStoreId] } },
       });
-      console.log("✅ Association réussie");
+      console.log("✅ Vector Store lié à l’assistant");
     } catch (err) {
-      console.error("⚠️ Impossible d’associer le Vector Store :", err);
+      console.error("⚠️ Impossible de lier le Vector Store à l’assistant :", err);
     }
 
     const files = await fetchVectorStoreFiles();
     res.json({ success: true, files });
   } catch (err) {
-    console.error("❌ Erreur interne upload :", err);
-    res.status(500).json({ error: "Erreur serveur lors de l'upload" });
+    console.error("❌ Erreur interne upload (SDK):", err);
+    res.status(500).json({ error: err.message || "Erreur serveur lors de l'upload" });
   }
 });
 
@@ -158,6 +155,6 @@ app.delete("/files/:id", async (req, res) => {
 });
 
 // Page test
-app.get("/", (req, res) => res.send("API MasdelInc Chatbot - Verbose mode ON"));
+app.get("/", (req, res) => res.send("API MasdelInc Chatbot - SDK OpenAI (corrigé)"));
 
 app.listen(port, () => console.log(`🚀 API démarrée sur http://localhost:${port}`));
