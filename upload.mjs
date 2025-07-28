@@ -3,16 +3,14 @@ import cors from "cors";
 import multer from "multer";
 import { OpenAI } from "openai";
 import dotenv from "dotenv";
-import fetch from "node-fetch";
 import { Readable } from "stream";
+import fetch from "node-fetch"; // Gardé seulement pour la récupération et suppression
 
 dotenv.config();
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Middleware pour body brut (si ce n’est pas du multipart)
-app.use(express.raw({ type: "application/octet-stream", limit: "50mb" }));
-
+app.use(express.raw({ type: "application/octet-stream", limit: "50mb" })); // Pour octet-stream
 const upload = multer();
 app.use(cors());
 
@@ -22,7 +20,7 @@ const vectorStoreId = process.env.OPENAI_VECTOR_STORE_ID;
 
 const openai = new OpenAI({ apiKey });
 
-// Vérification config
+// Vérification des variables au démarrage
 if (!apiKey || !assistantId || !vectorStoreId) {
   console.error(
     "❌ ERREUR DE CONFIGURATION - Variables manquantes :",
@@ -35,7 +33,7 @@ if (!apiKey || !assistantId || !vectorStoreId) {
   process.exit(1);
 }
 
-// Vérification /status
+// Endpoint de statut
 app.get("/status", async (req, res) => {
   const status = {
     OPENAI_API_KEY: !!apiKey,
@@ -89,18 +87,18 @@ async function fetchVectorStoreFiles() {
   );
 }
 
-// Endpoint upload (multipart OU brut)
+// Upload fichier (multipart ou brut)
 app.post("/files", upload.single("file"), async (req, res) => {
   try {
     let fileName;
     let fileBuffer;
 
-    // Cas 1 : multipart (depuis app Shopify/admin)
+    // Multipart (Shopify)
     if (req.file) {
       fileName = req.file.originalname;
       fileBuffer = req.file.buffer;
     }
-    // Cas 2 : upload brut (depuis curl.exe ou script)
+    // Octet-stream (curl.exe)
     else if (req.headers["content-type"] === "application/octet-stream") {
       fileName = "upload-raw.bin";
       fileBuffer = req.body;
@@ -110,26 +108,19 @@ app.post("/files", upload.single("file"), async (req, res) => {
 
     console.log("📤 Début upload :", fileName);
 
-    // Convertir le buffer en flux lisible (obligatoire pour OpenAI)
+    // Flux lisible (obligatoire pour SDK OpenAI)
     const stream = new Readable();
     stream.push(fileBuffer);
     stream.push(null);
 
-    console.log("➡️ Upload via SDK OpenAI…");
-    const uploadedFile = await openai.files.create({
+    // Upload direct vers Vector Store via SDK
+    const uploadedFile = await openai.vectorStores.files.create(vectorStoreId, {
       file: stream,
-      purpose: "assistants",
-      filename: fileName,
     });
 
-    // Associer au Vector Store
-    await openai.vectorStores.files.create(vectorStoreId, {
-      file_id: uploadedFile.id,
-    });
+    console.log(`✅ Fichier "${fileName}" ajouté au Vector Store : ${uploadedFile.id}`);
 
-    console.log(`✅ Fichier "${fileName}" ajouté et lié à ${vectorStoreId}`);
-
-    // Relier le Vector Store à l’assistant
+    // Lier le Vector Store à l’assistant
     try {
       await openai.assistants.update(assistantId, {
         tool_resources: { file_search: { vector_store_ids: [vectorStoreId] } },
@@ -142,7 +133,7 @@ app.post("/files", upload.single("file"), async (req, res) => {
     const files = await fetchVectorStoreFiles();
     res.json({ success: true, files });
   } catch (err) {
-    console.error("❌ Erreur interne upload (SDK):", err);
+    console.error("❌ Erreur interne upload :", err);
     res.status(500).json({ error: err.message || "Erreur serveur lors de l'upload" });
   }
 });
@@ -177,9 +168,9 @@ app.delete("/files/:id", async (req, res) => {
   }
 });
 
-// Page test
+// Page d’accueil
 app.get("/", (req, res) =>
-  res.send("API MasdelInc Chatbot - Compatible multipart + octet-stream (SDK)")
+  res.send("API MasdelInc Chatbot - Upload corrigé (SDK natif, sans form-data)")
 );
 
 app.listen(port, () => console.log(`🚀 API démarrée sur http://localhost:${port}`));
