@@ -3,8 +3,8 @@ import cors from "cors";
 import multer from "multer";
 import { OpenAI } from "openai";
 import dotenv from "dotenv";
-import { Readable } from "stream";
 import fetch from "node-fetch";
+import FormData from "form-data";
 
 dotenv.config();
 const app = express();
@@ -20,7 +20,7 @@ const vectorStoreId = process.env.OPENAI_VECTOR_STORE_ID;
 
 const openai = new OpenAI({ apiKey });
 
-// Vérification des variables au démarrage
+// Vérification au démarrage
 if (!apiKey || !assistantId || !vectorStoreId) {
   console.error(
     "❌ ERREUR DE CONFIGURATION : Vérifie ton .env ou les variables Render.\n" +
@@ -31,7 +31,7 @@ if (!apiKey || !assistantId || !vectorStoreId) {
   process.exit(1);
 }
 
-// Endpoint /status (test rapide API + OpenAI)
+// Endpoint /status
 app.get("/status", async (req, res) => {
   const status = {
     OPENAI_API_KEY: !!apiKey,
@@ -47,17 +47,16 @@ app.get("/status", async (req, res) => {
     status.openaiConnection = resp.ok;
   } catch (e) {
     console.error("❌ Erreur de connexion à OpenAI :", e);
-    status.openaiConnection = false;
   }
 
   res.json(status);
 });
 
-// Fonction utilitaire : liste les fichiers du Vector Store
+// Récupérer tous les fichiers
 async function fetchVectorStoreFiles() {
   const response = await fetch(
     `https://api.openai.com/v1/vector_stores/${vectorStoreId}/files`,
-    { method: "GET", headers: { Authorization: `Bearer ${apiKey}` } }
+    { headers: { Authorization: `Bearer ${apiKey}` } }
   );
 
   if (!response.ok) {
@@ -89,18 +88,22 @@ app.post("/files", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "Aucun fichier reçu" });
 
-    const bufferStream = new Readable();
-    bufferStream.push(req.file.buffer);
-    bufferStream.push(null);
+    // Créer le formulaire compatible OpenAI
+    const formData = new FormData();
+    formData.append("file", req.file.buffer, req.file.originalname);
 
     const uploadResponse = await fetch(
       `https://api.openai.com/v1/vector_stores/${vectorStoreId}/files`,
-      { method: "POST", headers: { Authorization: `Bearer ${apiKey}` }, body: bufferStream }
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}` },
+        body: formData,
+      }
     );
 
     if (!uploadResponse.ok) {
       const text = await uploadResponse.text();
-      console.error("❌ Erreur upload fichier :", text);
+      console.error(`❌ Erreur upload fichier (${req.file.originalname}) :`, text);
       return res.status(500).json({ error: `Erreur lors de l'upload (code ${uploadResponse.status})` });
     }
 
@@ -151,7 +154,7 @@ app.delete("/files/:id", async (req, res) => {
   }
 });
 
-// Page de test
+// Page par défaut
 app.get("/", (req, res) => {
   res.send("API MasdelInc Chatbot en ligne (Vector Store actif)");
 });
