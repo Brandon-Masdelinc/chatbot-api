@@ -19,13 +19,20 @@ const vectorStoreId = process.env.OPENAI_VECTOR_STORE_ID;
 
 const openai = new OpenAI({ apiKey });
 
-// Vérification config
+// Vérification config au démarrage
 if (!apiKey || !assistantId || !vectorStoreId) {
-  console.error("❌ Variables d'environnement manquantes !");
+  console.error(
+    "❌ ERREUR DE CONFIGURATION - Variables manquantes :",
+    {
+      OPENAI_API_KEY: !!apiKey,
+      OPENAI_ASSISTANT_ID: !!assistantId,
+      OPENAI_VECTOR_STORE_ID: !!vectorStoreId,
+    }
+  );
   process.exit(1);
 }
 
-// Vérifier OpenAI
+// Endpoint de statut
 app.get("/status", async (req, res) => {
   const status = {
     OPENAI_API_KEY: !!apiKey,
@@ -39,22 +46,29 @@ app.get("/status", async (req, res) => {
       headers: { Authorization: `Bearer ${apiKey}` },
     });
     status.openaiConnection = resp.ok;
-  } catch {
-    status.openaiConnection = false;
+  } catch (e) {
+    console.error("❌ Connexion OpenAI impossible :", e);
   }
 
   res.json(status);
 });
 
-// Récupérer fichiers
+// Récupérer la liste des fichiers
 async function fetchVectorStoreFiles() {
+  console.log("🔍 Récupération de la liste des fichiers…");
   const response = await fetch(
     `https://api.openai.com/v1/vector_stores/${vectorStoreId}/files`,
     { headers: { Authorization: `Bearer ${apiKey}` } }
   );
-  if (!response.ok) throw new Error(`Erreur API (code ${response.status})`);
-  const data = await response.json();
 
+  if (!response.ok) {
+    const text = await response.text();
+    console.error(`❌ Échec récupération fichiers (code ${response.status}):`, text);
+    throw new Error(`Impossible de lister les fichiers`);
+  }
+
+  const data = await response.json();
+  console.log(`📂 ${data.data?.length || 0} fichiers trouvés`);
   return Promise.all(
     (data.data || []).map(async (f) => {
       try {
@@ -64,7 +78,8 @@ async function fetchVectorStoreFiles() {
           name: full.filename,
           created_at: new Date(full.created_at * 1000).toLocaleString(),
         };
-      } catch {
+      } catch (err) {
+        console.error(`⚠️ Impossible de récupérer le détail du fichier ${f.id}`, err);
         return { id: f.id, name: "Inconnu", created_at: "Inconnu" };
       }
     })
@@ -73,33 +88,42 @@ async function fetchVectorStoreFiles() {
 
 // Upload fichier
 app.post("/files", upload.single("file"), async (req, res) => {
+  console.log("📤 Début upload :", req.file?.originalname || "Aucun fichier");
   try {
     if (!req.file) return res.status(400).json({ error: "Aucun fichier reçu" });
 
     const form = new FormData();
     form.append("file", req.file.buffer, req.file.originalname);
 
+    console.log("➡️ Envoi du fichier vers OpenAI…");
     const uploadResponse = await fetch(
       `https://api.openai.com/v1/vector_stores/${vectorStoreId}/files`,
       { method: "POST", headers: { Authorization: `Bearer ${apiKey}` }, body: form }
     );
 
+    const rawResponse = await uploadResponse.text();
     if (!uploadResponse.ok) {
-      const text = await uploadResponse.text();
-      console.error(`❌ Erreur upload (${req.file.originalname}):`, text);
-      return res.status(500).json({ error: text });
+      console.error(`❌ Upload refusé (code ${uploadResponse.status}) :`, rawResponse);
+      return res.status(500).json({ error: `Upload refusé : ${rawResponse}` });
     }
 
-    await openai.assistants.update(assistantId, {
-      tool_resources: { file_search: { vector_store_ids: [vectorStoreId] } },
-    });
+    console.log("✅ Upload accepté par OpenAI :", rawResponse);
 
-    console.log(`✅ Fichier "${req.file.originalname}" ajouté.`);
+    console.log("🔗 Association du Vector Store à l’assistant…");
+    try {
+      await openai.assistants.update(assistantId, {
+        tool_resources: { file_search: { vector_store_ids: [vectorStoreId] } },
+      });
+      console.log("✅ Association réussie");
+    } catch (err) {
+      console.error("⚠️ Impossible d’associer le Vector Store :", err);
+    }
+
     const files = await fetchVectorStoreFiles();
     res.json({ success: true, files });
   } catch (err) {
-    console.error("❌ Erreur upload serveur:", err);
-    res.status(500).json({ error: "Erreur interne lors de l'upload" });
+    console.error("❌ Erreur interne upload :", err);
+    res.status(500).json({ error: "Erreur serveur lors de l'upload" });
   }
 });
 
@@ -109,27 +133,31 @@ app.get("/files", async (req, res) => {
     const files = await fetchVectorStoreFiles();
     res.json({ success: true, files });
   } catch (err) {
-    res.status(500).json({ error: "Impossible de récupérer les fichiers" });
+    console.error("❌ Erreur liste fichiers :", err);
+    res.status(500).json({ error: "Erreur serveur" });
   }
 });
 
 // Suppression fichier
 app.delete("/files/:id", async (req, res) => {
+  const fileId = req.params.id;
+  console.log(`🗑️ Suppression fichier : ${fileId}`);
   try {
-    const fileId = req.params.id;
-    await fetch(
+    const delRes = await fetch(
       `https://api.openai.com/v1/vector_stores/${vectorStoreId}/files/${fileId}`,
       { method: "DELETE", headers: { Authorization: `Bearer ${apiKey}` } }
     );
+    console.log(`🔎 Réponse suppression vector store (code ${delRes.status})`);
     await openai.files.del(fileId);
     const files = await fetchVectorStoreFiles();
     res.json({ success: true, files });
   } catch (err) {
-    res.status(500).json({ error: "Erreur lors de la suppression" });
+    console.error("❌ Erreur suppression fichier :", err);
+    res.status(500).json({ error: "Erreur serveur suppression" });
   }
 });
 
 // Page test
-app.get("/", (req, res) => res.send("API Chatbot Render OK"));
+app.get("/", (req, res) => res.send("API MasdelInc Chatbot - Verbose mode ON"));
 
 app.listen(port, () => console.log(`🚀 API démarrée sur http://localhost:${port}`));
